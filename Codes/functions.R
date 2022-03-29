@@ -4,8 +4,8 @@
 # Function for summary statistics lasso
 summary.lasso <- function(lasso.mod, x, y, ind) {
   
-  x.train <- x[ind, ]
-  x.test <- x[-ind, ]
+  x.train <- x[rownames(x) %in% ind, ]
+  x.test <- x[!rownames(x) %in% ind, ]
   
   # Prediction
   pred.train <- try(as.factor(predict(lasso.mod, newx=x.train, type="class",
@@ -14,11 +14,11 @@ summary.lasso <- function(lasso.mod, x, y, ind) {
                                      s="lambda.min", alpha=1)), silent = TRUE)
   
   # Confusion matrix
-  conf.train <- caret::confusionMatrix(pred.train, as.factor(y[ind]))
-  conf.test <- caret::confusionMatrix(pred.test, as.factor(y[-ind]))
+  conf.train <- caret::confusionMatrix(pred.train, as.factor(y[names(y) %in% ind]))
+  conf.test <- caret::confusionMatrix(pred.test, as.factor(y[!names(y) %in% ind]))
   
   # Summary statistics
-  df.eval <- data.frame(Type= c("Train", "Test"),
+  df.eval <- data.frame(Type=c("Train", "Test"),
                         Kappa=c(conf.train$overall[["Kappa"]],
                                 conf.test$overall[["Kappa"]]
                         ),
@@ -63,10 +63,10 @@ summary.glm <- function(glm.mod, x, y, ind) {
     new.x.train <- as.data.frame(x)
   }
   
-  new.x.train <- x[ind, ]
-  new.x.test <- x[-ind, ]
-  y.train <- y[ind]
-  y.test <- y[-ind]
+  new.x.train <- x[rownames(x) %in% ind, ]
+  new.x.test <- x[!rownames(x) %in% ind, ]
+  y.train <- y[names(y) %in% ind]
+  y.test <- y[!names(y) %in% ind]
   
   # Prediction
   pred.train <- predict(glm.mod, newx=new.x.train, type="response")

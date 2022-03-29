@@ -1,118 +1,110 @@
 ####--------------------------------------------####
-#### Permutation: 14 microarray, 431 microbiome ####
+#### Permutation: 6 microarray, 431 microbiome ####
 ####--------------------------------------------####
 load("Data/group_crcad.Rda")
-load("Data/df_crc.Rda")
+load("Data/df_lasso_uArray.Rda")
 source("Codes/functions.R")
 
 
+
+## Load libraries
+library(parallel)
+library(ggplot2)
+library(glmnet)
+
+
+
+
+
 #####-------------------- CODES --------------------#####
-# Create the matrix for lasso input
-y <- group
-X <- data.matrix(df.crc)
+dt <- as.matrix.data.frame(df.uArray[, names(df.uArray)!="group"])
 
-uBiome <- colnames(X)[grepl("SVs", colnames(X), ignore.case = FALSE)]
-uArray <- colnames(X)[grepl("_at", colnames(X), ignore.case = FALSE)]
+uBiome <- colnames(dt)[grepl("SVs", colnames(dt), ignore.case = FALSE)]
+uArray <- colnames(dt)[grepl("_at", colnames(dt), ignore.case = FALSE)]
 
-penalty.fctr <- rep(0, ncol(X))
-names(penalty.fctr) <- colnames(X)
+penalty.fctr <- rep(0, ncol(dt))
+names(penalty.fctr) <- colnames(dt)
 penalty.fctr[uBiome] <- 1
 
 
-# LASSO
-fit.lasso <- function(X, y, alpha=1, partition=0.6, penalty=NULL, 
-                      n.iter=1000) {
-  
-  require(glmnet)
-  require(caret)
-  
-  out <- vector("list", n.iter)
-  
-  
-  for(i.k in 1:n.iter) {
-    options(warn = -1)
-    
-    
-    # Create data partition
-    ind <- createDataPartition(y, times = 1, p = partition, list = FALSE)
-    
-    
-    # LOGISTIC REGRESSION
-    dt.log <- data.frame(group=y[ind],
-                         X[ind, uArray])
-    names(dt.log)[2:ncol(dt.log)] <- substring(names(dt.log)[2:ncol(dt.log)], 2)
-    mod.glm <- glm(group ~ ., data=dt.log, family=binomial(link='logit'))
-    out.glm <- summary.glm(mod.glm, x=as.data.frame(X), y=y, ind=ind) 
-    
-    
-    # LASSO
-    if(!is.null(penalty)) {
-      cv.lasso <- try(cv.glmnet(x=X[ind, ], y=y[ind], alpha=alpha,
-                                standardize=TRUE, family="binomial",
-                                penalty.factor=penalty, 
-                                nfolds=10, type.measure="class"),
-                      silent = TRUE)
-      
-    } else {
-      cv.lasso <- try(cv.glmnet(x=X[ind, ], y=y[ind], alpha=alpha,
-                                standardize=TRUE, family="binomial",
-                                nfolds=10, parallel=TRUE, type.measure="class"),
-                      silent = TRUE)
-    }
-    
-    mod.lasso <- glmnet(x=X[ind, ], y=y[ind], alpha=1, family="binomial",
-                        penalty.factor=penalty.fctr, standardize=TRUE,
-                        lambda = cv.lasso$lambda.min)
-    
-    out.lasso <- summary.lasso(mod.lasso, x=X, y=y, ind=ind)
-    
-    
-    # PERMUTATED LASSO
-    smpl <- sample(nrow(X))
-    X.train.new <- data.frame(X[, uArray], X[smpl, uBiome])
-    colnames(X.train.new)[1:14] <- substring(colnames(X.train.new)[1:14], 2)
-    X.train.new <- data.matrix(X.train.new)
-    
-    if(is.null(penalty)) {
-      cv.perm <- try(cv.glmnet(x=X.train.new[ind, ], y=y[ind], alpha=alpha,
-                               standardize=TRUE, family="binomial",
-                               nfolds=10, parallel=TRUE, type.measure="class"),
-                     silent = TRUE)
-    } else {
-      cv.perm <- try(cv.glmnet(x=X.train.new[ind, ], y=y[ind], alpha=alpha,
-                               standardize=TRUE, family="binomial",
-                               penalty.factor=penalty, 
-                               nfolds=10, type.measure="class"),
-                     silent = TRUE)
-    }
-    
-    mod.perm <- glmnet(x=X.train.new[ind, ], y=y[ind], alpha=1, family="binomial",
-                       penalty.factor=penalty.fctr, standardize=TRUE,
-                       lambda = cv.perm$lambda.min)
-    
-    out.perm <- summary.lasso(mod.perm, x=X.train.new, y=y, ind=ind)
-    
-    
-    # Save the output
-    out[[i.k]] <- list(out.glm, out.lasso, out.perm)
-    names(out[[i.k]]) <- c("glm", "lasso", "permutation")
-    names(out)[[i.k]] <- i.k
-    
-  }
-  
-  return(out)
-  
-}
+# Create a cluster of cores
+cl <- makeCluster(getOption("cl.cores", 4))
+clusterExport(cl=cl, 
+              varlist=c("dt", "group", "penalty.fctr", 
+                        "uArray", "uBiome",
+                        "summary.lasso", "summary.glm"))
 
 
-# Standardized
-set.seed(1)
-t2 = Sys.time()
-out.joint <- fit.lasso(X, y, alpha=1, partition=0.6, penalty=penalty.fctr, 
-                       n.iter=1000)
-t <- Sys.time()
-print((t - t2)) #2.987652 mins
-save(out.joint, file = "Data/outJoint.Rda")
+# Main algorithm
+system.time({
+  out <- parLapply(cl=cl,
+                   X=1:1000,
+                   fun=function(i) {
+                     require(glmnet)
+                     require(caret)
+                     
+                     # sample 2/3 of the subjects at random
+                     id_keep <- sample(x=rownames(dt),
+                                       size=floor(2*nrow(dt)/3),
+                                       replace=FALSE)
+                     
+                     # LOGISTIC REGRESSION
+                     dt.log <- data.frame(group=group[id_keep],
+                                          dt[id_keep, uArray])
+                     names(dt.log)[2:ncol(dt.log)] <- substring(names(dt.log)[2:ncol(dt.log)], 2)
+                     mod.glm <- glm(group ~ ., data=dt.log, family=binomial(link='logit'))
+                     out.glm <- summary.glm(mod.glm, x=as.data.frame(dt), y=group, ind=id_keep) 
+                     
+                     
+                     # LASSO
+                     cv.lasso <- try(cv.glmnet(x=dt[id_keep, ], y=group[id_keep], alpha=1,
+                                               standardize=TRUE, family="binomial",
+                                               penalty.factor=penalty.fctr, 
+                                               nfolds=5, type.measure="class"),
+                                     silent=TRUE)
+                     
+                     m1 <- glmnet(x=dt[id_keep, ], y=group[id_keep], alpha=1, family="binomial",
+                                  penalty.factor=penalty.fctr, standardize=TRUE,
+                                  lambda=cv.lasso$lambda.min)
+                     
+                     out.lasso <- summary.lasso(m1, x=dt, y=group, ind=id_keep)
+                     
+                     
+                     # PERMUTATED LASSO
+                     smpl <- sample(nrow(dt))
+                     X.train.new <- cbind(dt[, uArray], dt[smpl, uBiome])
+                     # colnames(X.train.new)[1:6] <- substring(colnames(X.train.new)[1:6], 2)
+                     X.train.new <- data.matrix(X.train.new)
+                     
+                     cv.perm <- try(cv.glmnet(x=X.train.new[id_keep, ], y=group[id_keep], alpha=1,
+                                              standardize=TRUE, family="binomial",
+                                              penalty.factor=penalty.fctr, 
+                                              nfolds=5, type.measure="class"),
+                                    silent = TRUE)
+                     
+                     mod.perm <- glmnet(x=X.train.new[id_keep, ], y=group[id_keep], alpha=1, family="binomial",
+                                        penalty.factor=penalty.fctr, standardize=TRUE,
+                                        lambda=cv.perm$lambda.min)
+                     
+                     out.perm <- summary.lasso(mod.perm, x=X.train.new, y=group, ind=id_keep)
+                     
+                     
+                     # Save the output
+                     out <- list(out.glm, out.lasso, out.perm)
+                     names(out) <- c("glm", "lasso", "permutation")
+                     
+                     return(out)
+                   }
+  )
+})
+
+
+# Stop the cluster
+stopCluster(cl)
+gc() # Running time: 26.090s
+
+save(out, file="Data/perm_uArray.Rda")
+
 
 
 
@@ -120,20 +112,36 @@ save(out.joint, file = "Data/outJoint.Rda")
 
 
 #####-------------------- OUTPUT: GLM --------------------#####
-load("Data/outJoint.Rda")
+load("Data/perm_uArray.Rda")
 
-evalGLM <- NULL
-for(i in 1:length(out.joint)) {
-  temp <- out.joint[[i]]$glm$evaluation
-  temp$iter <- names(out.joint)[i]
-  evalGLM <- rbind(evalGLM, temp)
-}
+library(tibble)
+library(tidyr)
+library(magrittr)
+library(dplyr)
 
-ggplot(evalGLM[evalGLM$Type=="Test", ], aes(x=Balanced.Acc)) +
+
+# Evaluation
+tmp <- lapply(out, function(a) { #out[[1]]
+  x <- lapply(a, function(b) { #out[[1]]$glm
+    b$evaluation
+  })
+  
+  y <- do.call("rbind", x) %>%
+    rownames_to_column(var="model")
+})
+
+eval <- do.call("rbind", tmp) %>%
+  mutate(model=do.call("rbind", strsplit(model, "[.]"))[, 1])
+
+save(eval, file="Data/perf eval_permut uArray.Rda")
+
+
+# Plot
+ggplot(eval[eval$Type=="Test" & eval$model=="glm", ], aes(x=Balanced.Acc)) +
   geom_density() +
-  geom_vline(aes(xintercept=mean(evalGLM$Balanced.Acc)), color="red", linetype="dashed", size=1) +
-  annotate("text", x=mean(evalGLM$Balanced.Acc)-0.02, y=c(15), 
-           label=paste0("Mean: ", round(mean(evalGLM$Balanced.Acc), 2)), 
+  geom_vline(aes(xintercept=mean(eval$Balanced.Acc)), color="red", linetype="dashed", size=1) +
+  annotate("text", x=mean(eval$Balanced.Acc)-0.02, y=c(15), 
+           label=paste0("Mean: ", round(mean(eval$Balanced.Acc), 2)), 
            size=4.5, color = c("red"))+
   labs(x="Balanced Accuracy",
        y="Density") +
@@ -150,64 +158,82 @@ ggplot(evalGLM[evalGLM$Type=="Test", ], aes(x=Balanced.Acc)) +
 
 
 
+
 #####-------------------- OUTPUT: LASSO --------------------#####
-load("Data/outJoint.Rda")
-
-evalLASSO <- NULL
-for(i in 1:length(out.joint)) {
-  temp <- out.joint[[i]]$lasso$evaluation
-  temp$iter <- names(out.joint)[i]
-  evalLASSO <- rbind(evalLASSO, temp)
-}
+load("Data/perf eval_permut uArray.Rda")
+load("Data/perm_uArray.Rda")
 
 
-# Microbiome frequency of selection
-coef.lasso <- NULL
-for(i in 1:length(out.joint)) {
-  temp <- out.joint[[i]]$lasso$selected.var
-  
-  if(nrow(temp) == 0) {
-    next
-  } else {
-    temp$iter <- names(out.joint)[i]
-    coef.lasso <- rbind(coef.lasso, temp)
-  }
-  
-  print(i)
-}
+## Evaluation
+ggplot(eval[eval$Type=="Test" & eval$model=="lasso", ], aes(x=Balanced.Acc)) +
+  geom_density() +
+  geom_vline(aes(xintercept=mean(eval$Balanced.Acc)), color="red", linetype="dashed", size=1) +
+  annotate("text", x=mean(eval$Balanced.Acc)-0.02, y=c(15), 
+           label=paste0("Mean: ", round(mean(eval$Balanced.Acc), 2)), 
+           size=4.5, color = c("red"))+
+  labs(x="Balanced Accuracy",
+       y="Density") +
+  theme(panel.background = element_blank(),
+        panel.border = element_blank(),
+        #legend.position = "none", 
+        axis.title.y = element_text(size = 16),
+        axis.text.y = element_text(size = 14),
+        axis.title.x = element_text(size = 16),
+        axis.text.x = element_text(size = 14))
 
 
-# Remove those that is always 0
-coef.lasso <- coef.lasso[abs(coef.lasso$coef) > 0, ]
-coef.lasso <- coef.lasso[coef.lasso$var != "(Intercept)", ]
 
-# Get the feature and genus name
+## Feature selection
+tmp <- lapply(out, function(a) { #out[[1]]
+  a$lasso$selected.var
+})
+
+coef <- do.call("rbind", tmp) %>%
+  filter(abs(coef) > 0,
+         var!="(Intercept)")
+rownames(coef) <- NULL
+
+coef <- coef %>%
+  select(-coef) %>%
+  table %>%
+  data.frame() %>%
+  set_colnames(c("Feat", "Freq")) 
+
+
+
+## Get the genes and genus name
+library(Biobase)
+
+
+# uArray
+load("Data/esetRna_new.Rda") 
+
+fdata <- as(featureData(esetRna), "data.frame")
+temp <- subset(fdata, select = c(SYMBOL))
+
+coef <- merge(coef, temp, by.x="Feat", by.y="row.names", all.x=TRUE) %>%
+  rename(name="SYMBOL")
+
+
+# uBiome
 load("Data/uBiome_taxtable.Rda")
 
-ubiome <- unique(coef.lasso$var[grepl("svs", coef.lasso$var, ignore.case = TRUE)])
-temp.ubiome <- coef.lasso[coef.lasso$var %in% ubiome, ]
-temp.ubiome <- merge(temp.ubiome, taxTable, by.x = "var", by.y = "row.names", all.x = TRUE)
-temp.ubiome$Genus <- as.factor(factor(temp.ubiome$Genus))
+coef <- merge(coef, taxTable, by.x="Feat", by.y="row.names", all.x=TRUE) %>%
+  mutate(name=ifelse(is.na(name), as.character(Genus), name)) %>%
+  select(-Genus) %>%
+  mutate(prop=Freq/1000)
 
-save(temp.ubiome, file = "Data/ubiomeSelect_joint.Rda")
-
-order.x <- factor(unique(coef.lasso$Genus), levels = unique(coef.lasso$Genus))
-
-give.n <- function(x, upper_limit = max(coef.lasso$coef, na.rm = TRUE)*1.15){
-  return(data.frame(y = as.numeric(.95*upper_limit),
-                    label = paste('n=', 
-                                  format(length(x), big.mark = ",", decimal.mark = ".", scientific = FALSE))))
-}
+save(coef, file = "Data/coef_permut uArray.Rda")
 
 
-d <- as.data.frame(table(temp.ubiome$Genus))
-colnames(d) <- c("Genus", "freq")
-d <- d[order(-d$freq), ]
-d$Genus <- as.factor(factor(d$Genus, levels = unique(d$Genus[order(-d$freq)]), ordered=TRUE))
+d <- coef %>%
+  filter(Feat %in% Feat[grepl("SVs", Feat)])
+d <- d[order(-d$Freq), ]
 
-ggplot(data=d[1:20, ], aes(x=Genus, y=freq)) +
+
+ggplot(data=d[1:20, ], aes(x=reorder(name, -Freq), y=Freq)) +
   geom_col() +
-  # labs(x = "", y = "Selection proportion") +
+  labs(x = "", y = "Frequency of selection") +
   # scale_fill_manual(name = "> 0.5",
   #                   labels = c("No", "Yes"),
   #                   values = c("1" = "tomato3", "0" = "grey54")) +
@@ -223,20 +249,16 @@ ggplot(data=d[1:20, ], aes(x=Genus, y=freq)) +
 
 
 #####-------------------- OUTPUT: PERMUTATION --------------------#####
-load("Data/outJoint.Rda")
+load("Data/perm_uArray.Rda")
+load("Data/perf eval_permut uArray.Rda")
 
-evalPERM <- NULL
-for(i in 1:length(out.joint)) {
-  temp <- out.joint[[i]]$permutation$evaluation
-  temp$iter <- names(out.joint)[i]
-  evalPERM <- rbind(evalPERM, temp)
-}
 
-ggplot(evalPERM[evalPERM$Type=="Test", ], aes(x=Balanced.Acc)) +
+## Evaluation
+ggplot(eval[eval$Type=="Test" & eval$model=="permutation", ], aes(x=Balanced.Acc)) +
   geom_density() +
-  geom_vline(aes(xintercept=mean(evalPERM$Balanced.Acc)), color="red", linetype="dashed", size=1) +
-  annotate("text", x=mean(evalPERM$Balanced.Acc)-0.02, y=c(15), 
-           label=paste0("Mean: ", round(mean(evalPERM$Balanced.Acc), 2)), 
+  geom_vline(aes(xintercept=mean(eval$Balanced.Acc)), color="red", linetype="dashed", size=1) +
+  annotate("text", x=mean(eval$Balanced.Acc)-0.02, y=c(15), 
+           label=paste0("Mean: ", round(mean(eval$Balanced.Acc), 2)), 
            size=4.5, color = c("red"))+
   labs(x="Balanced Accuracy",
        y="Density") +
@@ -249,53 +271,58 @@ ggplot(evalPERM[evalPERM$Type=="Test", ], aes(x=Balanced.Acc)) +
         axis.text.x = element_text(size = 14))
 
 
-# Microbiome frequency of selection
-coef.perm <- NULL
-for(i in 1:length(out.joint)) {
-  temp <- out.joint[[i]]$permutation$selected.var
-  
-  if(nrow(temp) == 0) {
-    next
-  } else {
-    temp$iter <- names(out.joint)[i]
-    coef.perm <- rbind(coef.perm, temp)
-  }
-  
-  print(i)
-}
+
+## Feature selection
+tmp <- lapply(out, function(a) { #out[[1]]
+  a$permutation$selected.var
+})
+
+coef <- do.call("rbind", tmp) %>%
+  filter(abs(coef) > 0,
+         var!="(Intercept)")
+rownames(coef) <- NULL
+
+coef <- coef %>%
+  select(-coef) %>%
+  table %>%
+  data.frame() %>%
+  set_colnames(c("Feat", "Freq")) 
 
 
-# Remove those that is always 0
-coef.perm <- coef.perm[abs(coef.perm$coef) > 0, ]
-coef.perm <- coef.perm[coef.perm$var != "(Intercept)", ]
 
-# Get the feature and genus name
+## Get the genes and genus name
+library(Biobase)
+
+
+# uArray
+load("Data/esetRna_new.Rda") 
+
+fdata <- as(featureData(esetRna), "data.frame")
+temp <- subset(fdata, select = c(SYMBOL))
+
+coef <- merge(coef, temp, by.x="Feat", by.y="row.names", all.x=TRUE) %>%
+  rename(name="SYMBOL")
+
+
+# uBiome
 load("Data/uBiome_taxtable.Rda")
 
-ubiome <- unique(coef.perm$var[grepl("svs", coef.perm$var, ignore.case = TRUE)])
-temp.ubiome <- coef.perm[coef.perm$var %in% ubiome, ]
-temp.ubiome <- merge(temp.ubiome, taxTable, by.x = "var", by.y = "row.names", all.x = TRUE)
-temp.ubiome$Genus <- as.factor(factor(temp.ubiome$Genus))
+coef <- merge(coef, taxTable, by.x="Feat", by.y="row.names", all.x=TRUE) %>%
+  mutate(name=ifelse(is.na(name), as.character(Genus), name)) %>%
+  select(-Genus) %>%
+  mutate(prop=Freq/1000)
 
-save(temp.ubiome, file = "Data/ubiomeSelect_joint_permutation.Rda")
-
-order.x <- factor(unique(coef.perm$Genus), levels = unique(coef.perm$Genus))
-
-give.n <- function(x, upper_limit = max(coef.perm$coef, na.rm = TRUE)*1.15){
-  return(data.frame(y = as.numeric(.95*upper_limit),
-                    label = paste('n=', 
-                                  format(length(x), big.mark = ",", decimal.mark = ".", scientific = FALSE))))
-}
+save(coef, file = "Data/coef permut_permut uArray.Rda")
 
 
-d <- as.data.frame(table(temp.ubiome$Genus))
-colnames(d) <- c("Genus", "freq")
-d <- d[order(-d$freq), ]
-d$Genus <- as.factor(factor(d$Genus, levels = unique(d$Genus[order(-d$freq)]), ordered=TRUE))
+d <- coef %>%
+  filter(Feat %in% Feat[grepl("SVs", Feat)])
+d <- d[order(-d$Freq), ]
 
-ggplot(data=d[1:20, ], aes(x=Genus, y=freq)) +
+
+ggplot(data=d[1:20, ], aes(x=reorder(name, -Freq), y=Freq)) +
   geom_col() +
-  # labs(x = "", y = "Selection proportion") +
+  labs(x = "", y = "Frequency of selection") +
   # scale_fill_manual(name = "> 0.5",
   #                   labels = c("No", "Yes"),
   #                   values = c("1" = "tomato3", "0" = "grey54")) +
@@ -311,22 +338,23 @@ ggplot(data=d[1:20, ], aes(x=Genus, y=freq)) +
 
 
 #####-------------------- OUTPUT: LASSO VS GLMM --------------------#####
-evalLASSO <- evalLASSO[evalLASSO$Type=="Test", ]
-evalGLM <- evalGLM[evalGLM$Type=="Test", ]
+evalLASSO <- eval[eval$Type=="Test" & eval$model=="lasso", ] %>%
+  select(Balanced.Acc) %>%
+  rename(AccLASSO="Balanced.Acc")
+evalGLM <- eval[eval$Type=="Test" & eval$model=="glm", ] %>%
+  select(Balanced.Acc) %>%
+  rename(AccGLMM="Balanced.Acc")
 
-dfLASSO <- evalLASSO[, names(evalLASSO) %in% c("Balanced.Acc", "iter")]
-dfGLMM <- evalGLM[, names(evalGLM) %in% c("Balanced.Acc", "iter")]
-
-names(dfLASSO)[1] <- "AccLASSO"
-names(dfGLMM)[1] <- "AccGLMM"
-
-lasso_glmm <- merge(dfLASSO, dfGLMM, by='iter')
+lasso_glmm <- cbind(evalLASSO, evalGLM)
 lasso_glmm$gainLASSO <- (lasso_glmm$AccLASSO-lasso_glmm$AccGLMM)/lasso_glmm$AccLASSO
 
 
 # Histogram of accuracy
 library(data.table)
+library(reshape2)
+
 temp <- subset(lasso_glmm, select=-c(gainLASSO))
+temp$iter <- seq(1, nrow(temp))
 long_LassoGLMM <- melt(setDT(temp), id.vars=c("iter"), variable.name="Model")
 
 
@@ -358,7 +386,7 @@ ggplot(long_LassoGLMM, aes(x=value, color=Model)) +
 # Histogram of gaining of LASSO compared to GLMM
 ggplot(lasso_glmm, aes(x=gainLASSO)) +
   geom_density(adjust=2) +
-  geom_vline(aes(xintercept=mean(lasso_glmm$gainLASSO)), color="red", linetype="dashed", size=1) +
+  geom_vline(aes(xintercept=median(lasso_glmm$gainLASSO)), color="red", linetype="dashed", size=1) +
   annotate("text", x=median(lasso_glmm$gainLASSO)+0.02, y=c(15), 
            label=paste0("Median: ", round(median(lasso_glmm$gainLASSO), 2)), 
            size=4.5, color = c("red"))+
@@ -378,22 +406,23 @@ ggplot(lasso_glmm, aes(x=gainLASSO)) +
 
 
 #####-------------------- OUTPUT: LASSO VS Permutation --------------------#####
-evalLASSO <- evalLASSO[evalLASSO$Type=="Test", ]
-evalPERM <- evalPERM[evalPERM$Type=="Test", ]
+evalLASSO <- eval[eval$Type=="Test" & eval$model=="lasso", ] %>%
+  select(Balanced.Acc) %>%
+  rename(AccLASSO="Balanced.Acc")
+evalPERM <- eval[eval$Type=="Test" & eval$model=="permutation", ] %>%
+  select(Balanced.Acc) %>%
+  rename(AccPERM="Balanced.Acc")
 
-dfLASSO <- evalLASSO[, names(evalLASSO) %in% c("Balanced.Acc", "iter")]
-dfPERM <- evalPERM[, names(evalPERM) %in% c("Balanced.Acc", "iter")]
-
-names(dfLASSO)[1] <- "AccLASSO"
-names(dfPERM)[1] <- "AccPERM"
-
-lasso_perm <- merge(dfLASSO, dfPERM, by='iter')
+lasso_perm <- cbind(evalLASSO, evalPERM)
 lasso_perm$gainLASSO <- (lasso_perm$AccLASSO-lasso_perm$AccPERM)/lasso_perm$AccLASSO
 
 
 # Histogram of accuracy
 library(data.table)
+library(reshape2)
+
 temp <- subset(lasso_perm, select=-c(gainLASSO))
+temp$iter <- seq(1, nrow(temp))
 long_LassoPERM <- melt(setDT(temp), id.vars=c("iter"), variable.name="Model")
 
 
@@ -403,7 +432,7 @@ stat_LassoPERM <- long_LassoPERM%>%
   group_by(Model)%>% 
   summarise(Median=median(value), Std=sd(value))
 
-ggplot(long_LassoPERM, aes(x=value, color=Model)) +
+ggplot(long_LassoGLMM, aes(x=value, color=Model)) +
   geom_density(adjust=2) +
   scale_color_manual(values=c("blue", "red"),
                      breaks=c("AccLASSO", "AccPERM")) +
@@ -422,10 +451,10 @@ ggplot(long_LassoPERM, aes(x=value, color=Model)) +
         axis.text.x = element_text(size = 14))
 
 
-# Histogram of gaining of LASSO compared to Permutation
+# Histogram of gaining of LASSO compared to GLMM
 ggplot(lasso_perm, aes(x=gainLASSO)) +
   geom_density(adjust=2) +
-  geom_vline(aes(xintercept=mean(lasso_perm$gainLASSO)), color="red", linetype="dashed", size=1) +
+  geom_vline(aes(xintercept=median(lasso_perm$gainLASSO)), color="red", linetype="dashed", size=1) +
   annotate("text", x=median(lasso_perm$gainLASSO)+0.02, y=c(15), 
            label=paste0("Median: ", round(median(lasso_perm$gainLASSO), 2)), 
            size=4.5, color = c("red"))+
@@ -445,38 +474,39 @@ ggplot(lasso_perm, aes(x=gainLASSO)) +
 
 
 #####-------------------- OUTPUT: GLMM VS Permutation --------------------#####
-evalGLM <- evalGLM[evalGLM$Type=="Test", ]
-evalPERM <- evalPERM[evalPERM$Type=="Test", ]
+evalGLM <- eval[eval$Type=="Test" & eval$model=="glm", ] %>%
+  select(Balanced.Acc) %>%
+  rename(AccGLM="Balanced.Acc")
+evalPERM <- eval[eval$Type=="Test" & eval$model=="permutation", ] %>%
+  select(Balanced.Acc) %>%
+  rename(AccPERM="Balanced.Acc")
 
-dfGLMM <- evalGLM[, names(evalGLM) %in% c("Balanced.Acc", "iter")]
-dfPERM <- evalPERM[, names(evalPERM) %in% c("Balanced.Acc", "iter")]
-
-names(dfGLMM)[1] <- "AccGLMM"
-names(dfPERM)[1] <- "AccPERM"
-
-glmm_perm <- merge(dfGLMM, dfPERM, by='iter')
-glmm_perm$gainGLMM <- (glmm_perm$AccGLMM-glmm_perm$AccPERM)/glmm_perm$AccGLMM
+GLM_perm <- cbind(evalGLM, evalPERM)
+GLM_perm$gainGLM <- (GLM_perm$AccGLM-GLM_perm$AccPERM)/GLM_perm$AccGLM
 
 
 # Histogram of accuracy
 library(data.table)
-temp <- subset(glmm_perm, select=-c(gainGLMM))
-long_glmmPERM <- melt(setDT(temp), id.vars=c("iter"), variable.name="Model")
+library(reshape2)
+
+temp <- subset(GLM_perm, select=-c(gainGLM))
+temp$iter <- seq(1, nrow(temp))
+long_GLMPERM <- melt(setDT(temp), id.vars=c("iter"), variable.name="Model")
 
 
 library(dplyr)
 library(magrittr)
-stat_glmmPERM <- long_glmmPERM%>%
+stat_GLMPERM <- long_GLMPERM%>%
   group_by(Model)%>% 
   summarise(Median=median(value), Std=sd(value))
 
-ggplot(long_glmmPERM, aes(x=value, color=Model)) +
+ggplot(long_GLMPERM, aes(x=value, color=Model)) +
   geom_density(adjust=2) +
   scale_color_manual(values=c("blue", "red"),
-                     breaks=c("AccGLMM", "AccPERM")) +
-  geom_vline(aes(xintercept=Median), stat_glmmPERM, color=c("blue", "red"), linetype="dashed") +
-  annotate("text", x=(stat_glmmPERM$Median)+0.02, y=10,
-           label=paste0("Median: ", round(stat_glmmPERM$Median, 2)),
+                     breaks=c("AccGLM", "AccPERM")) +
+  geom_vline(aes(xintercept=Median), stat_GLMPERM, color=c("blue", "red"), linetype="dashed") +
+  annotate("text", x=(stat_GLMPERM$Median)+0.02, y=10,
+           label=paste0("Median: ", round(stat_GLMPERM$Median, 2)),
            size=4.5, color=c("blue", "red")) +
   labs(x="Accuracy",
        y="Density") +
@@ -489,14 +519,14 @@ ggplot(long_glmmPERM, aes(x=value, color=Model)) +
         axis.text.x = element_text(size = 14))
 
 
-# Histogram of gaining of LASSO compared to Permutation
-ggplot(glmm_perm, aes(x=gainGLMM)) +
+# Histogram of gaining of GLM compared to PERMUTATION
+ggplot(GLM_perm, aes(x=gainGLM)) +
   geom_density(adjust=2) +
-  geom_vline(aes(xintercept=mean(glmm_perm$gainGLMM)), color="red", linetype="dashed", size=1) +
-  annotate("text", x=median(glmm_perm$gainGLMM)+0.02, y=c(15), 
-           label=paste0("Median: ", round(median(glmm_perm$gainGLMM), 2)), 
+  geom_vline(aes(xintercept=median(GLM_perm$gainGLM)), color="red", linetype="dashed", size=1) +
+  annotate("text", x=median(GLM_perm$gainGLM)+0.02, y=c(15), 
+           label=paste0("Median: ", round(median(GLM_perm$gainGLM), 2)), 
            size=4.5, color = c("red"))+
-  labs(x="Accuracy Gained for GLMM",
+  labs(x="Accuracy Gained for GLM",
        y="Density") +
   theme(panel.background = element_blank(),
         panel.border = element_blank(),
